@@ -1,4 +1,11 @@
+# Build output directory
 out/
+
+# Secondary build output directory
 out2/
+
+# NPM dependencies
 node_modules/
+
+# macOS filesystem metadata
 .DS_Store
