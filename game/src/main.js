@@ -1,134 +1,202 @@
-// Boot and the one loop: input is read every frame, the world advances in fixed 1/60 s steps
-// (several in a slow frame, none in a fast one), and the renderer paints what is there. The game
-// moves between four screens: title, play, paused and game over.
+// Boot and the one loop. Input is read once a frame, the world advances in fixed 1/60 s steps
+// (several in a slow frame, none in a fast one), then the city, the actors and the HUD are painted.
+// The game moves between three screens: the title card, play, and the pause menu.
 //
-// ?seed=N fixes the falling pattern. ?shot=start|play|end (with &seed=N) stages that scene
-// instead of running the loop, paints it twice and sets window.__shotReady for a screenshot.
-import { BEST_KEY, LIVES, STEP } from './config.js';
-import { createRandom } from './random.js';
-import { createWorld, EVENT_HIT, EVENT_OVER } from './world.js';
-import { ACTION_CONFIRM, ACTION_PAUSE, createInput } from './input.js';
-import { createRenderer, SCREEN_OVER, SCREEN_PAUSED, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
+// ?seed=N fixes the whole city and everything in it. ?shot=title|street|drive|wanted (with &seed=N)
+// stages that scene from the real simulation, paints it twice and sets window.__shotReady, which is
+// what tools/shoot.sh waits for before it takes the screenshot.
+import { STEP, VIEW } from './config.js';
+import { createInput } from './input.js';
+import { createGame, stepGame, applySave } from './world.js';
+import { hasSave, loadSave, saveGame } from './save.js';
+import { createAudio, createSilentAudio } from './audio.js';
+import { drawHud } from './hud.js';
+import { createTitleArt, drawPause, drawTitle, PAUSE_ITEMS } from './screens.js';
 import { stageShot } from './shots.js';
+import { screenToWorld } from './camera.js';
+import { createRenderer } from './render.js';
 
-/** The longest frame the loop catches up on; a longer stall (a hidden tab) is dropped, not replayed. */
+/** The longest frame the loop catches up on; a longer stall (a hidden tab) is dropped. */
 const MAX_FRAME = 0.25;
 
 const params = new URLSearchParams(window.location.search);
 const shot = params.get('shot');
 const seedParam = Number.parseInt(params.get('seed') ?? '', 10);
-const seed = Number.isInteger(seedParam) ? seedParam : Math.floor(Math.random() * 4294967296);
+const seed = Number.isInteger(seedParam) ? seedParam : Math.floor(Math.random() * 2147483647);
 
 const canvas = document.getElementById('game');
 const status = document.getElementById('status');
-const world = createWorld(createRandom(seed));
 const renderer = createRenderer(canvas);
+const ctx = renderer.ctx;
+const titleArt = createTitleArt(seed);
 
-function readBest() {
+/** Scale the fixed 1280x720 buffer to the window without stretching it. */
+function fit() {
+  const scale = Math.min(window.innerWidth / VIEW.width, window.innerHeight / VIEW.height);
+  canvas.style.width = `${Math.round(VIEW.width * scale)}px`;
+  canvas.style.height = `${Math.round(VIEW.height * scale)}px`;
+}
+window.addEventListener('resize', fit);
+fit();
+
+/** Shout any crash onto the page and the canvas, so a failed screenshot run is obvious. */
+function reportCrash(message) {
+  const box = document.getElementById('crash');
+  if (box) {
+    box.textContent = `PORT SABLE error: ${message}`;
+    box.style.display = 'block';
+  }
   try {
-    return Number.parseInt(window.localStorage.getItem(BEST_KEY) ?? '0', 10) || 0;
+    ctx.fillStyle = '#1b0e0e';
+    ctx.fillRect(0, 0, VIEW.width, 90);
+    ctx.fillStyle = '#ff8c7a';
+    ctx.font = '600 18px system-ui, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText(`error: ${message}`.slice(0, 120), 24, 50);
   } catch {
-    return 0;
+    // The context itself is gone; the page text is the report.
   }
+  window.__shotReady = true;
+}
+window.addEventListener('error', (event) => reportCrash(event.message ?? 'unknown'));
+window.addEventListener('unhandledrejection', (event) => reportCrash(String(event.reason).slice(0, 160)));
+
+const audio = shot ? createSilentAudio() : createAudio(true);
+let game = createGame(seed, { audio });
+let screen = 'title';
+let selected = 0;
+let saveNote = '';
+let clock = 0;
+
+function announce(text) {
+  if (status) status.textContent = text;
 }
 
-function saveBest(value) {
-  try {
-    window.localStorage.setItem(BEST_KEY, String(value));
-  } catch {
-    // Storage can be off (private windows): the best score then lasts this visit only.
+/** Paint whichever screen is current. */
+function paint() {
+  if (screen === 'title') {
+    drawTitle(ctx, { art: titleArt, time: clock, hasSave: hasSave() });
+    return;
   }
+  renderer.drawWorld(game);
+  drawHud(ctx, game);
+  if (screen === 'paused') drawPause(ctx, game, selected, saveNote);
 }
 
-function runShot(name) {
-  const scene = stageShot(name, world);
-  let painted = 0;
-  function paint() {
-    renderer.draw(world.state, scene.screen, scene.best);
-    painted += 1;
-    if (painted < 2) requestAnimationFrame(paint);
-    else window.__shotReady = true;
+/** Start a fresh run, or resume the saved one. */
+function startGame(fromSave) {
+  game = createGame(seed, { audio });
+  if (fromSave) {
+    const data = loadSave();
+    if (data) {
+      game = createGame(data.seed ?? seed, { audio });
+      applySave(game, data);
+      game.toast('Run restored');
+    }
   }
-  requestAnimationFrame(paint);
+  screen = 'play';
+  announce(fromSave ? 'Saved run restored' : 'Port Sable: new game started');
 }
 
-function runGame() {
-  const input = createInput(canvas);
-  let screen = SCREEN_TITLE;
-  let best = readBest();
-  let accumulator = 0;
-  let last = performance.now();
-
-  // Screen readers (and anyone watching the page's text) hear the screen changes and each hit.
-  function announce(message) {
-    status.textContent = message;
-  }
-
-  function startGame() {
-    world.reset();
-    accumulator = 0;
-    screen = SCREEN_PLAY;
-    announce(`Playing. ${LIVES} lives.`);
-  }
-
-  function endGame() {
-    screen = SCREEN_OVER;
-    if (world.state.score > best) {
-      best = world.state.score;
-      saveBest(best);
-    }
-    announce(`Game over. Score ${world.state.score}. Best ${best}.`);
-  }
-
-  function handleActions() {
-    const actions = input.takeActions();
-    if (actions & ACTION_CONFIRM && (screen === SCREEN_TITLE || screen === SCREEN_OVER)) startGame();
-    else if (actions & ACTION_PAUSE && screen === SCREEN_PLAY) {
-      screen = SCREEN_PAUSED;
-      announce('Paused.');
-    } else if (actions & (ACTION_PAUSE | ACTION_CONFIRM) && screen === SCREEN_PAUSED) {
-      screen = SCREEN_PLAY;
-      announce('Playing.');
-    }
-  }
-
-  function step() {
-    if (screen === SCREEN_TITLE) {
-      world.step(STEP, 0, true);
-      return;
-    }
-    const events = world.step(STEP, input.direction(), false);
-    if (events & EVENT_OVER) endGame();
-    else if (events & EVENT_HIT) announce(world.state.lives === 1 ? 'Hit. 1 life left.' : `Hit. ${world.state.lives} lives left.`);
-  }
-
-  function frame(now) {
-    requestAnimationFrame(frame);
-    accumulator += Math.min((now - last) / 1000, MAX_FRAME);
-    last = now;
-    handleActions();
-    if (screen === SCREEN_TITLE || screen === SCREEN_PLAY) {
-      while (accumulator >= STEP && (screen === SCREEN_TITLE || screen === SCREEN_PLAY)) {
-        step();
-        accumulator -= STEP;
-      }
+/** The pause menu's four choices. */
+function choosePauseItem() {
+  const item = PAUSE_ITEMS[selected];
+  audio.ui();
+  if (item === 'Continue') {
+    screen = 'play';
+  } else if (item === 'Save game') {
+    saveNote = saveGame(game) ? 'Run saved to this browser' : 'Saving is unavailable here';
+  } else if (item === 'Load game') {
+    const data = loadSave();
+    if (data) {
+      startGame(true);
+      saveNote = '';
     } else {
-      accumulator = 0;
+      saveNote = 'No saved run yet';
     }
-    renderer.draw(world.state, screen, best);
+  } else {
+    screen = 'title';
+    selected = 0;
+    saveNote = '';
   }
-
-  // Leaving the tab pauses a running game rather than letting blocks fall unseen.
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden && screen === SCREEN_PLAY) {
-      screen = SCREEN_PAUSED;
-      announce('Paused.');
-    }
-  });
-
-  announce('Block Dodger. Press Space or click to start.');
-  requestAnimationFrame(frame);
 }
 
-if (shot) runShot(shot);
-else runGame();
+if (shot) {
+  // A screenshot: stage the scene from the real simulation, paint twice, then stop.
+  const scene = stageShot(shot, game);
+  screen = scene.screen;
+  clock = scene.clock ?? 0;
+  let painted = 0;
+  const paintShot = () => {
+    paint();
+    painted += 1;
+    if (painted < 2) {
+      window.requestAnimationFrame(paintShot);
+    } else {
+      // tools/shoot.sh reads both of these to be sure it photographed a finished frame.
+      window.__shotReady = true;
+      document.title = `PORT SABLE shot ready: ${shot}`;
+    }
+  };
+  window.requestAnimationFrame(paintShot);
+} else {
+  const input = createInput(canvas);
+  let last = performance.now();
+  let accumulator = 0;
+  const unlock = () => audio.unlock();
+  window.addEventListener('keydown', unlock, { once: true });
+  window.addEventListener('mousedown', unlock, { once: true });
+
+  const menuHeld = { down: false };
+  const frame = (now) => {
+    const delta = Math.min(MAX_FRAME, (now - last) / 1000);
+    last = now;
+    clock += delta;
+    const snapshot = input.read();
+    if (screen === 'title') {
+      if (snapshot.confirmPressed) startGame(false);
+      else if (snapshot.interactPressed) startGame(false);
+    } else if (screen === 'play') {
+      if (snapshot.pausePressed) {
+        screen = 'paused';
+        selected = 0;
+        saveNote = '';
+        audio.idle();
+        audio.siren(false);
+      } else {
+        const aim = screenToWorld(game.camera, snapshot.aimX, snapshot.aimY);
+        snapshot.aimWorldX = aim.x;
+        snapshot.aimWorldY = aim.y;
+        accumulator += delta;
+        let steps = 0;
+        while (accumulator >= STEP && steps < 5) {
+          stepGame(game, STEP, steps === 0 ? snapshot : { ...snapshot, firePressed: false, interactPressed: false, switchPressed: false });
+          accumulator -= STEP;
+          steps += 1;
+        }
+        if (steps === 5) accumulator = 0;
+      }
+    } else if (screen === 'paused') {
+      if (snapshot.pausePressed) screen = 'play';
+      if (snapshot.moveY < 0 && !menuHeld.down) {
+        selected = (selected + PAUSE_ITEMS.length - 1) % PAUSE_ITEMS.length;
+        menuHeld.down = true;
+      } else if (snapshot.moveY > 0 && !menuHeld.down) {
+        selected = (selected + 1) % PAUSE_ITEMS.length;
+        menuHeld.down = true;
+      } else if (snapshot.moveY === 0) {
+        menuHeld.down = false;
+      }
+      if (snapshot.confirmPressed) choosePauseItem();
+    }
+    paint();
+    window.requestAnimationFrame(frame);
+  };
+  window.requestAnimationFrame(frame);
+  announce('Port Sable title screen. Press Enter to start.');
+}
+
+// Load the saved run straight from the title with L.
+window.addEventListener('keydown', (event) => {
+  if (event.code === 'KeyL' && screen === 'title' && hasSave()) startGame(true);
+});

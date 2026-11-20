@@ -1,53 +1,121 @@
-// Keyboard and pointer input. Held keys give a steering direction; one-shot presses (start or
-// restart, pause) are queued as bit flags and taken once by the loop, so a press between two
-// frames is never lost and never counted twice.
+// Keyboard and mouse, read once a frame into a flat snapshot the world can also be handed by the
+// screenshot stager: everything downstream takes an input object, never the DOM.
 
-export const ACTION_CONFIRM = 1;
-export const ACTION_PAUSE = 2;
+/** The neutral snapshot: no keys, no clicks, aiming straight ahead. */
+export function emptyInput() {
+  return {
+    moveX: 0,
+    moveY: 0,
+    run: false,
+    handbrake: false,
+    fire: false,
+    firePressed: false,
+    interact: false,
+    interactPressed: false,
+    pausePressed: false,
+    confirmPressed: false,
+    switchPressed: false,
+    aimX: 0,
+    aimY: 0,
+    aimActive: false,
+  };
+}
 
-const LEFT = new Set(['ArrowLeft', 'KeyA']);
-const RIGHT = new Set(['ArrowRight', 'KeyD']);
-const CONFIRM = new Set(['Space', 'Enter']);
-const PAUSE = new Set(['KeyP', 'Escape']);
+/** Half the internal view, in client pixels, used to turn mouse position into view pixels. */
+const VIEW_HALF = { x: 640, y: 360 };
 
-export function createInput(target) {
-  let left = false;
-  let right = false;
-  let actions = 0;
+const KEY_MAP = {
+  KeyW: 'up', ArrowUp: 'up',
+  KeyS: 'down', ArrowDown: 'down',
+  KeyA: 'left', ArrowLeft: 'left',
+  KeyD: 'right', ArrowRight: 'right',
+  ShiftLeft: 'run', ShiftRight: 'run',
+  Space: 'fire',
+  KeyF: 'interact', KeyE: 'interact',
+  KeyQ: 'switch',
+};
 
-  window.addEventListener('keydown', (event) => {
-    if (LEFT.has(event.code)) left = true;
-    else if (RIGHT.has(event.code)) right = true;
-    else if (CONFIRM.has(event.code)) {
-      if (!event.repeat) actions |= ACTION_CONFIRM;
-    } else if (PAUSE.has(event.code)) {
-      if (!event.repeat) actions |= ACTION_PAUSE;
-    } else return;
-    event.preventDefault();
+/**
+ * Attach listeners to the canvas and window and return a reader. `read()` gives a fresh snapshot
+ * and clears the one-frame "pressed" edges, so a tap is never consumed twice.
+ */
+export function createInput(canvas) {
+  const held = new Set();
+  const edges = { fire: false, interact: false, pause: false, confirm: false, switch: false };
+  const pointer = { x: VIEW_HALF.x, y: VIEW_HALF.y, down: false, moved: false };
+
+  function onKeyDown(event) {
+    if (event.repeat) {
+      if (KEY_MAP[event.code] || event.code === 'Escape' || event.code === 'Enter') event.preventDefault();
+      return;
+    }
+    const action = KEY_MAP[event.code];
+    if (action) held.add(action);
+    if (action === 'interact') edges.interact = true;
+    if (action === 'fire') edges.fire = true;
+    if (action === 'switch') edges.switch = true;
+    if (event.code === 'Escape') edges.pause = true;
+    if (event.code === 'Enter' || event.code === 'NumpadEnter') edges.confirm = true;
+    if (event.code === 'KeyP') edges.pause = true;
+    if (action || event.code === 'Escape' || event.code === 'Enter' || event.code === 'KeyP') event.preventDefault();
+    if (action === 'fire') edges.confirm = true;
+  }
+
+  function onKeyUp(event) {
+    const action = KEY_MAP[event.code];
+    if (action) held.delete(action);
+  }
+
+  function onBlur() {
+    held.clear();
+    pointer.down = false;
+  }
+
+  function trackPointer(event) {
+    const box = canvas.getBoundingClientRect();
+    if (box.width === 0 || box.height === 0) return;
+    pointer.x = ((event.clientX - box.left) / box.width) * VIEW_HALF.x * 2;
+    pointer.y = ((event.clientY - box.top) / box.height) * VIEW_HALF.y * 2;
+    pointer.moved = true;
+  }
+
+  window.addEventListener('keydown', onKeyDown);
+  window.addEventListener('keyup', onKeyUp);
+  window.addEventListener('blur', onBlur);
+  canvas.addEventListener('mousemove', trackPointer);
+  canvas.addEventListener('mousedown', (event) => {
+    trackPointer(event);
+    pointer.down = true;
+    edges.fire = true;
+    edges.confirm = true;
   });
-  window.addEventListener('keyup', (event) => {
-    if (LEFT.has(event.code)) left = false;
-    else if (RIGHT.has(event.code)) right = false;
-  });
-  // A key released while the tab is hidden never sends keyup: let go of everything on blur.
-  window.addEventListener('blur', () => {
-    left = false;
-    right = false;
-  });
-  target.addEventListener('pointerdown', () => {
-    actions |= ACTION_CONFIRM;
-  });
+  window.addEventListener('mouseup', () => { pointer.down = false; });
+  canvas.addEventListener('contextmenu', (event) => event.preventDefault());
 
   return {
-    /** -1 for left, 1 for right, 0 for neither or both. */
-    direction() {
-      return (right ? 1 : 0) - (left ? 1 : 0);
-    },
-    /** The one-shot presses since the last call, as ACTION_* flags. */
-    takeActions() {
-      const taken = actions;
-      actions = 0;
-      return taken;
+    pointer,
+    read() {
+      const input = emptyInput();
+      input.moveX = (held.has('right') ? 1 : 0) - (held.has('left') ? 1 : 0);
+      input.moveY = (held.has('down') ? 1 : 0) - (held.has('up') ? 1 : 0);
+      input.run = held.has('run');
+      input.handbrake = held.has('run');
+      input.fire = pointer.down || held.has('fire');
+      input.firePressed = edges.fire;
+      input.interact = held.has('interact');
+      input.interactPressed = edges.interact;
+      input.pausePressed = edges.pause;
+      input.confirmPressed = edges.confirm;
+      input.switchPressed = edges.switch;
+      input.aimX = pointer.x;
+      input.aimY = pointer.y;
+      input.aimActive = pointer.moved;
+      edges.fire = false;
+      edges.interact = false;
+      edges.pause = false;
+      edges.confirm = false;
+      edges.switch = false;
+      return input;
     },
   };
 }

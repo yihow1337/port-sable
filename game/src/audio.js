@@ -1,0 +1,192 @@
+// All of Port Sable's sound is synthesised in WebAudio at run time: no audio files, no network.
+// Nothing is created until the first gesture (browsers forbid it), and every method is a safe
+// no-op before then, so the screenshot runs stay silent and never throw.
+
+/** A tiny deterministic generator for the noise buffers, so audio never touches the game's RNG. */
+function noiseFill(data) {
+  let state = 22222;
+  for (let index = 0; index < data.length; index += 1) {
+    state = (state * 1103515245 + 12345) & 0x7fffffff;
+    data[index] = (state / 0x3fffffff) - 1;
+  }
+}
+
+export function createAudio(enabled) {
+  let ctx = null;
+  let master = null;
+  let engine = null;
+  let tyres = null;
+  let siren = null;
+  let muted = !enabled;
+  let started = false;
+
+  function ensure() {
+    if (muted || started) return ctx;
+    const Context = typeof window !== 'undefined' ? (window.AudioContext ?? window.webkitAudioContext) : null;
+    if (!Context) {
+      muted = true;
+      return null;
+    }
+    try {
+      ctx = new Context();
+      master = ctx.createGain();
+      master.gain.value = 0.5;
+      master.connect(ctx.destination);
+      const noise = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate);
+      noiseFill(noise.getChannelData(0));
+      buildEngine(noise);
+      buildTyres(noise);
+      buildSiren();
+      started = true;
+    } catch {
+      muted = true;
+      ctx = null;
+    }
+    return ctx;
+  }
+
+  function buildEngine(noise) {
+    const source = ctx.createBufferSource();
+    source.buffer = noise;
+    source.loop = true;
+    const band = ctx.createBiquadFilter();
+    band.type = 'bandpass';
+    band.frequency.value = 120;
+    band.Q.value = 1.5;
+    const tone = ctx.createOscillator();
+    tone.type = 'sawtooth';
+    tone.frequency.value = 54;
+    const toneGain = ctx.createGain();
+    toneGain.gain.value = 0.16;
+    const gain = ctx.createGain();
+    gain.gain.value = 0;
+    source.connect(band).connect(gain);
+    tone.connect(toneGain).connect(gain);
+    gain.connect(master);
+    source.start();
+    tone.start();
+    engine = { gain, band, tone };
+  }
+
+  function buildTyres(noise) {
+    const source = ctx.createBufferSource();
+    source.buffer = noise;
+    source.loop = true;
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'highpass';
+    filter.frequency.value = 1900;
+    const gain = ctx.createGain();
+    gain.gain.value = 0;
+    source.connect(filter).connect(gain).connect(master);
+    source.start();
+    tyres = { gain };
+  }
+
+  function buildSiren() {
+    const carrier = ctx.createOscillator();
+    carrier.type = 'square';
+    carrier.frequency.value = 680;
+    const sweep = ctx.createOscillator();
+    sweep.type = 'sine';
+    sweep.frequency.value = 1.35;
+    const depth = ctx.createGain();
+    depth.gain.value = 240;
+    sweep.connect(depth).connect(carrier.frequency);
+    const gain = ctx.createGain();
+    gain.gain.value = 0;
+    carrier.connect(gain).connect(master);
+    carrier.start();
+    sweep.start();
+    siren = { gain };
+  }
+
+  /** A quick noise burst through a falling filter: gunfire, impacts. */
+  function burst(duration, startFrequency, endFrequency, level, type) {
+    if (!ensure()) return;
+    const source = ctx.createBufferSource();
+    const buffer = ctx.createBuffer(1, Math.ceil(ctx.sampleRate * duration), ctx.sampleRate);
+    noiseFill(buffer.getChannelData(0));
+    source.buffer = buffer;
+    const filter = ctx.createBiquadFilter();
+    filter.type = type ?? 'lowpass';
+    filter.frequency.setValueAtTime(startFrequency, ctx.currentTime);
+    filter.frequency.exponentialRampToValueAtTime(Math.max(60, endFrequency), ctx.currentTime + duration);
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(level, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + duration);
+    source.connect(filter).connect(gain).connect(master);
+    source.start();
+  }
+
+  /** A pitched blip: menus, pickups, stingers. */
+  function tone(frequency, duration, level, type) {
+    if (!ensure()) return;
+    const osc = ctx.createOscillator();
+    osc.type = type ?? 'triangle';
+    osc.frequency.setValueAtTime(frequency, ctx.currentTime);
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(level, ctx.currentTime + 0.012);
+    gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + duration);
+    osc.connect(gain).connect(master);
+    osc.start();
+    osc.stop(ctx.currentTime + duration + 0.05);
+  }
+
+  return {
+    /** Called from the first real key or click. */
+    unlock() {
+      if (muted) return;
+      ensure();
+      if (ctx && ctx.state === 'suspended') ctx.resume();
+    },
+    get ready() { return started; },
+    mute(value) {
+      muted = value;
+      if (master) master.gain.value = value ? 0 : 0.5;
+    },
+    /** Engine note and tyre noise, driven every frame from the car Riley is in. */
+    drive(rpm, load, slip) {
+      if (!started || !engine) return;
+      const now = ctx.currentTime;
+      engine.tone.frequency.setTargetAtTime(44 + rpm * 190, now, 0.06);
+      engine.band.frequency.setTargetAtTime(90 + rpm * 420, now, 0.06);
+      engine.gain.gain.setTargetAtTime(0.1 + load * 0.2, now, 0.08);
+      tyres.gain.gain.setTargetAtTime(slip * 0.1, now, 0.05);
+    },
+    /** Engine off (on foot). */
+    idle() {
+      if (!started || !engine) return;
+      engine.gain.gain.setTargetAtTime(0, ctx.currentTime, 0.12);
+      tyres.gain.gain.setTargetAtTime(0, ctx.currentTime, 0.1);
+    },
+    siren(on) {
+      if (!started || !siren) return;
+      siren.gain.gain.setTargetAtTime(on ? 0.05 : 0, ctx.currentTime, 0.2);
+    },
+    gunshot(kind) {
+      if (kind === 'smg') burst(0.12, 5200, 300, 0.4);
+      else burst(0.2, 3800, 180, 0.55);
+    },
+    punch() { burst(0.1, 900, 90, 0.4); tone(110, 0.1, 0.18, 'sine'); },
+    crash(strength) { burst(0.3, 2600, 120, Math.min(0.7, 0.2 + strength * 0.003)); },
+    pickup() { tone(620, 0.1, 0.16); tone(930, 0.16, 0.13); },
+    ui() { tone(420, 0.07, 0.12, 'square'); },
+    wantedUp(stars) {
+      tone(180 + stars * 24, 0.5, 0.14, 'sawtooth');
+      tone(135 + stars * 18, 0.6, 0.1, 'triangle');
+    },
+    missionDone() { tone(523, 0.18, 0.16); tone(659, 0.2, 0.15); tone(784, 0.5, 0.14); },
+    missionFail() { tone(220, 0.5, 0.16, 'sawtooth'); tone(165, 0.7, 0.13, 'sawtooth'); },
+  };
+}
+
+/** A silent stand-in with the same shape, used by the screenshot runs. */
+export function createSilentAudio() {
+  const nothing = () => {};
+  return {
+    unlock: nothing, ready: false, mute: nothing, drive: nothing, idle: nothing, siren: nothing,
+    gunshot: nothing, punch: nothing, crash: nothing, pickup: nothing, ui: nothing,
+    wantedUp: nothing, missionDone: nothing, missionFail: nothing,
+  };
+}

@@ -3,16 +3,25 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Block Dodger</title>
+<title>PORT SABLE — an original gulf-coast crime game</title>
+<meta name="description" content="PORT SABLE: drive, steal and survive in a sun-bleached gulf-coast city. An original open-world crime game in Canvas 2D, offline, no libraries.">
 <style>
-  html, body { margin: 0; height: 100%; overflow: hidden; background: #11141b; }
-  #game { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #140f12; }
+  body { display: flex; align-items: center; justify-content: center; }
+  #game { display: block; image-rendering: auto; background: #140f12; box-shadow: 0 0 60px rgba(0, 0, 0, 0.75); }
+  /* Shown only when something throws, so a bad screenshot run is never a silent black frame. */
+  #crash {
+    display: none; position: fixed; left: 0; right: 0; top: 0; z-index: 9;
+    font: 600 15px/1.5 system-ui, sans-serif; color: #ffd0c4; background: #46161a;
+    padding: 10px 16px; white-space: pre-wrap;
+  }
   /* Read aloud, never shown: the status line screen readers announce. */
   #status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 </style>
 </head>
 <body>
-<canvas id="game" aria-label="Block Dodger: move the paddle left and right to dodge falling blocks and catch coins"></canvas>
+<canvas id="game" width="1280" height="720" aria-label="PORT SABLE: drive, walk and survive in a gulf-coast city. WASD to move, F to enter or steal a car, space to fire, escape to pause."></canvas>
+<p id="crash" role="alert"></p>
 <p id="status" role="status" aria-live="polite"></p>
 <script type="module" src="./src/main.js"></script>
 </body>

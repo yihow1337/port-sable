@@ -1,141 +1,689 @@
-// Drawing only: the world's state and the current screen in, pixels out. The 1280x720 playfield
-// is scaled to fit the window and centred, the margin filled with the backdrop colour. Flat
-// rectangles and circles, canvas text for the HUD and the panels. Text that holds a number is
-// rebuilt only when the number changes, so a frame allocates nothing.
-import { FIELD, FONT, LIVES, PALETTE } from './config.js';
-import { KIND_COIN } from './world.js';
+// Painting Port Sable at golden hour. The city is drawn top-down, but every building, car and
+// person is extruded away from the middle of the screen in proportion to its height, and only the
+// two faces turned away from the camera are filled, which is what gives the view its depth.
+import { viewBounds, worldToScreen } from './camera.js';
+import { DISTRICTS, LIGHT, ROAD, VIEW, WORLD } from './config.js';
+import { waterEdge } from './city.js';
+import { missionWaypoint } from './missions.js';
+import { drawBullets, drawGrade, drawParticles, drawPeople, drawPickups, drawVehicles, drawWaypoint } from './actors.js';
+import { lift, roundRect, shade } from './draw.js';
 
-export const SCREEN_TITLE = 'title';
-export const SCREEN_PLAY = 'play';
-export const SCREEN_PAUSED = 'paused';
-export const SCREEN_OVER = 'over';
-
-/** The panel's width; its height grows with its lines: room for the title, the lines and the prompt. */
-const PANEL = { width: 600, top: 134, line: 34, bottom: 70 };
-const LIFE_SIZE = 20;
-const LIFE_GAP = 8;
-
-function cachedLabel(prefix) {
-  let value = -1;
-  let text = '';
-  return function label(next) {
-    if (next !== value) {
-      value = next;
-      text = prefix + next;
-    }
-    return text;
+export function createRenderer(canvas) {
+  const ctx = canvas.getContext('2d', { alpha: false });
+  canvas.width = VIEW.width;
+  canvas.height = VIEW.height;
+  return {
+    ctx,
+    /** Paint one frame of the world (no HUD; hud.js draws over this). */
+    drawWorld(game) {
+      drawWorld(ctx, game);
+    },
   };
 }
 
-export function createRenderer(canvas) {
-  const context = canvas.getContext('2d');
-  const view = { scale: 1, x: 0, y: 0 };
-  const scoreLabel = cachedLabel('Score ');
-  const levelLabel = cachedLabel('Level ');
-  const finalLabel = cachedLabel('Score ');
-  const bestLabel = cachedLabel('Best ');
+function drawWorld(ctx, game) {
+  const camera = game.camera;
+  const bounds = viewBounds(camera, 260);
+  ctx.save();
+  drawGround(ctx, game, bounds);
+  drawWater(ctx, game, bounds);
+  drawRoads(ctx, game, bounds);
+  drawBlocks(ctx, game, bounds);
+  drawSkids(ctx, game);
+  drawPiers(ctx, game, bounds);
+  drawFlatProps(ctx, game, bounds);
+  drawBuildingShadows(ctx, game, bounds);
+  drawBuildings(ctx, game, bounds);
+  drawTallProps(ctx, game, bounds);
+  drawPickups(ctx, game);
+  drawWaypoint(ctx, game, missionWaypoint(game));
+  drawVehicles(ctx, game, bounds);
+  drawPeople(ctx, game, bounds);
+  drawBullets(ctx, game);
+  drawParticles(ctx, game);
+  drawGrade(ctx, game);
+  ctx.restore();
+}
 
-  function resize() {
-    const ratio = window.devicePixelRatio || 1;
-    const width = Math.round(window.innerWidth * ratio);
-    const height = Math.round(window.innerHeight * ratio);
-    canvas.width = width;
-    canvas.height = height;
-    view.scale = Math.min(width / FIELD.width, height / FIELD.height);
-    view.x = (width - FIELD.width * view.scale) / 2;
-    view.y = (height - FIELD.height * view.scale) / 2;
+/** The dirt the whole city sits on, tinted per district. */
+function drawGround(ctx, game, bounds) {
+  const camera = game.camera;
+  ctx.fillStyle = '#6a6153';
+  ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+  const step = 300;
+  for (let x = Math.floor(bounds.x / step) * step; x < bounds.x + bounds.w; x += step) {
+    for (let y = Math.floor(bounds.y / step) * step; y < bounds.y + bounds.h; y += step) {
+      const district = DISTRICTS.find((candidate) => candidate.id === districtIdAt(x + step / 2, y + step / 2));
+      if (!district) continue;
+      const a = worldToScreen(camera, x, y);
+      const b = worldToScreen(camera, x + step, y + step);
+      ctx.fillStyle = district.ground;
+      ctx.fillRect(a.x - 1, a.y - 1, b.x - a.x + 2, b.y - a.y + 2);
+    }
   }
+}
 
-  const fonts = new Map();
-  function text(value, x, y, size, color, align) {
-    if (!fonts.has(size)) fonts.set(size, `${size}px ${FONT}`);
-    context.font = fonts.get(size);
-    context.fillStyle = color;
-    context.textAlign = align;
-    context.fillText(value, x, y);
+/** Kept local so render.js does not need the city's rule table. */
+function districtIdAt(x, y) {
+  if (y > 1990) return 'docks';
+  if (x < 1150) return 'refinery';
+  if (y < 770) return 'oldfort';
+  if (x > 2520) return 'palmreach';
+  return 'midtown';
+}
+
+/** The gulf: a teal gradient, a line of surf, long wave strokes and a path of sun glitter. */
+function drawWater(ctx, game, bounds) {
+  const camera = game.camera;
+  if (bounds.y + bounds.h < 2300) return;
+  const left = Math.max(0, bounds.x);
+  const right = Math.min(WORLD.width, bounds.x + bounds.w);
+  const topScreen = worldToScreen(camera, left, 2300);
+  const gradient = ctx.createLinearGradient(0, topScreen.y, 0, VIEW.height);
+  gradient.addColorStop(0, '#2e8f96');
+  gradient.addColorStop(0.5, '#1f7781');
+  gradient.addColorStop(1, '#14545f');
+  ctx.beginPath();
+  const stepX = 26;
+  let started = false;
+  for (let x = left; x <= right; x += stepX) {
+    const point = worldToScreen(camera, x, waterEdge(x));
+    if (!started) {
+      ctx.moveTo(point.x, point.y);
+      started = true;
+    } else ctx.lineTo(point.x, point.y);
   }
+  const end = worldToScreen(camera, right, waterEdge(right));
+  ctx.lineTo(end.x, VIEW.height + 10);
+  const startPoint = worldToScreen(camera, left, 0);
+  ctx.lineTo(startPoint.x, VIEW.height + 10);
+  ctx.closePath();
+  ctx.fillStyle = gradient;
+  ctx.fill();
+  // Surf.
+  ctx.save();
+  ctx.clip();
+  ctx.strokeStyle = 'rgba(236, 246, 240, 0.72)';
+  ctx.lineWidth = 3 * camera.zoom;
+  ctx.beginPath();
+  for (let x = left; x <= right; x += stepX) {
+    const surf = waterEdge(x) + 5 + Math.sin(x * 0.03 + game.time * 1.6) * 3;
+    const point = worldToScreen(camera, x, surf);
+    if (x === left) ctx.moveTo(point.x, point.y);
+    else ctx.lineTo(point.x, point.y);
+  }
+  ctx.stroke();
+  // Swell.
+  ctx.strokeStyle = 'rgba(176, 226, 222, 0.14)';
+  ctx.lineWidth = 2 * camera.zoom;
+  for (let row = 0; row < 9; row += 1) {
+    ctx.beginPath();
+    for (let x = left; x <= right; x += 42) {
+      const y = 2440 + row * 34 + Math.sin(x * 0.012 + row * 1.7 + game.time * 0.8) * 9;
+      const point = worldToScreen(camera, x, y);
+      if (x === left) ctx.moveTo(point.x, point.y);
+      else ctx.lineTo(point.x, point.y);
+    }
+    ctx.stroke();
+  }
+  // Glitter: short broken highlights scattered over the swell, brightest near the sun's road.
+  for (let row = 0; row < 26; row += 1) {
+    const y = 2426 + row * 17;
+    for (let flake = 0; flake < 7; flake += 1) {
+      const seedX = ((row * 71 + flake * 173) % 1000) / 1000;
+      const x = left + (right - left) * seedX + Math.sin(row * 2.1 + game.time * 0.9) * 10;
+      const near = Math.max(0, 1 - Math.abs(x - 1180) / 900);
+      const width = 7 + ((row * 13 + flake * 7) % 17);
+      ctx.fillStyle = `rgba(255, 238, 196, ${0.07 + near * 0.3})`;
+      const a = worldToScreen(camera, x, y);
+      const b = worldToScreen(camera, x + width, y + 2.2);
+      ctx.fillRect(a.x, a.y, b.x - a.x, Math.max(1, b.y - a.y));
+    }
+  }
+  ctx.restore();
+}
 
-  function drawField(state) {
-    context.fillStyle = PALETTE.sky;
-    context.fillRect(0, 0, FIELD.width, FIELD.height);
-    context.fillStyle = PALETTE.ground;
-    context.fillRect(0, FIELD.groundY, FIELD.width, FIELD.height - FIELD.groundY);
-
-    const items = state.items;
-    for (let index = 0; index < items.length; index += 1) {
-      const item = items[index];
-      if (!item.active) continue;
-      if (item.kind === KIND_COIN) {
-        context.fillStyle = PALETTE.coin;
-        context.beginPath();
-        context.arc(item.x + item.width / 2, item.y + item.height / 2, item.width / 2, 0, Math.PI * 2);
-        context.fill();
-      } else {
-        context.fillStyle = PALETTE.block;
-        context.fillRect(item.x, item.y, item.width, item.height);
+/** Asphalt, centre lines, lane dashes and crosswalks. */
+function drawRoads(ctx, game, bounds) {
+  const camera = game.camera;
+  const city = game.city;
+  ctx.fillStyle = '#4a463f';
+  for (const road of city.roads) {
+    if (road.x > bounds.x + bounds.w || road.x + road.w < bounds.x || road.y > bounds.y + bounds.h || road.y + road.h < bounds.y) continue;
+    const a = worldToScreen(camera, road.x, road.y);
+    const b = worldToScreen(camera, road.x + road.w, road.y + road.h);
+    ctx.fillStyle = road.arterial ? '#3d3932' : '#36322b';
+    ctx.fillRect(a.x, a.y, b.x - a.x, b.y - a.y);
+  }
+  // Centre lines.
+  ctx.lineCap = 'butt';
+  for (const road of city.roads) {
+    if (road.x > bounds.x + bounds.w || road.x + road.w < bounds.x || road.y > bounds.y + bounds.h || road.y + road.h < bounds.y) continue;
+    const alongStart = road.horizontal ? Math.max(road.x, bounds.x) : Math.max(road.y, bounds.y);
+    const alongEnd = road.horizontal ? Math.min(road.x + road.w, bounds.x + bounds.w) : Math.min(road.y + road.h, bounds.y + bounds.h);
+    const centre = road.horizontal ? road.cy : road.cx;
+    if (road.arterial) {
+      ctx.strokeStyle = 'rgba(236, 205, 108, 0.85)';
+      ctx.lineWidth = Math.max(1, 2.2 * camera.zoom);
+      for (const offset of [-3.5, 3.5]) {
+        ctx.beginPath();
+        const p1 = road.horizontal ? worldToScreen(camera, alongStart, centre + offset) : worldToScreen(camera, centre + offset, alongStart);
+        const p2 = road.horizontal ? worldToScreen(camera, alongEnd, centre + offset) : worldToScreen(camera, centre + offset, alongEnd);
+        ctx.moveTo(p1.x, p1.y);
+        ctx.lineTo(p2.x, p2.y);
+        ctx.stroke();
+      }
+    } else {
+      ctx.strokeStyle = 'rgba(232, 228, 214, 0.5)';
+      ctx.lineWidth = Math.max(1, 2 * camera.zoom);
+      ctx.beginPath();
+      for (let along = alongStart; along < alongEnd; along += ROAD.dash * 2) {
+        const p1 = road.horizontal ? worldToScreen(camera, along, centre) : worldToScreen(camera, centre, along);
+        const p2 = road.horizontal ? worldToScreen(camera, Math.min(along + ROAD.dash, alongEnd), centre) : worldToScreen(camera, centre, Math.min(along + ROAD.dash, alongEnd));
+        ctx.moveTo(p1.x, p1.y);
+        ctx.lineTo(p2.x, p2.y);
+      }
+      ctx.stroke();
+    }
+    // Kerb edge.
+    ctx.strokeStyle = 'rgba(28, 26, 22, 0.3)';
+    ctx.lineWidth = Math.max(1, 1.5 * camera.zoom);
+    ctx.beginPath();
+    for (const offset of [-road.half, road.half]) {
+      const p1 = road.horizontal ? worldToScreen(camera, alongStart, centre + offset) : worldToScreen(camera, centre + offset, alongStart);
+      const p2 = road.horizontal ? worldToScreen(camera, alongEnd, centre + offset) : worldToScreen(camera, centre + offset, alongEnd);
+      ctx.moveTo(p1.x, p1.y);
+      ctx.lineTo(p2.x, p2.y);
+    }
+    ctx.stroke();
+  }
+  // Crosswalks at every intersection in view.
+  ctx.fillStyle = 'rgba(238, 232, 216, 0.55)';
+  for (const node of city.nodes) {
+    if (node.x < bounds.x - 80 || node.x > bounds.x + bounds.w + 80 || node.y < bounds.y - 80 || node.y > bounds.y + bounds.h + 80) continue;
+    const avenue = city.avenues[node.i];
+    const street = city.streets[node.j];
+    for (const sign of [-1, 1]) {
+      for (let stripe = -3; stripe <= 3; stripe += 1) {
+        const a = worldToScreen(camera, node.x + stripe * 9 - 3, node.y + sign * (street.half + 4));
+        const b = worldToScreen(camera, node.x + stripe * 9 + 3, node.y + sign * (street.half + 16));
+        ctx.fillRect(a.x, a.y, Math.max(1, b.x - a.x), Math.max(1, b.y - a.y));
+        const c = worldToScreen(camera, node.x + sign * (avenue.half + 4), node.y + stripe * 9 - 3);
+        const d = worldToScreen(camera, node.x + sign * (avenue.half + 16), node.y + stripe * 9 + 3);
+        ctx.fillRect(c.x, c.y, Math.max(1, d.x - c.x), Math.max(1, d.y - c.y));
       }
     }
+  }
+}
 
-    const player = state.player;
-    // Blink while invulnerable after a hit: hidden on every other tenth of a second.
-    if (player.invulnerable === 0 || Math.floor(player.invulnerable * 10) % 2 === 1) {
-      context.fillStyle = PALETTE.player;
-      context.fillRect(player.x, player.y, player.width, player.height);
+/** Sidewalk rings, park lawns and lot asphalt. */
+function drawBlocks(ctx, game, bounds) {
+  const camera = game.camera;
+  for (const block of game.city.blocks) {
+    if (block.x > bounds.x + bounds.w || block.x + block.w < bounds.x || block.y > bounds.y + bounds.h || block.y + block.h < bounds.y) continue;
+    const a = worldToScreen(camera, block.x, block.y);
+    const b = worldToScreen(camera, block.x + block.w, block.y + block.h);
+    ctx.fillStyle = '#c2b193';
+    ctx.fillRect(a.x, a.y, b.x - a.x, b.y - a.y);
+    ctx.strokeStyle = 'rgba(255, 246, 226, 0.5)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(a.x + 0.5, a.y + 0.5, b.x - a.x - 1, b.y - a.y - 1);
+    if (block.lawn) {
+      const c = worldToScreen(camera, block.lawn.x, block.lawn.y);
+      const d = worldToScreen(camera, block.lawn.x + block.lawn.w, block.lawn.y + block.lawn.h);
+      ctx.fillStyle = '#7d8f5e';
+      ctx.fillRect(c.x, c.y, d.x - c.x, d.y - c.y);
+      ctx.fillStyle = 'rgba(150, 168, 108, 0.6)';
+      ctx.fillRect(c.x + 6, c.y + 6, Math.max(0, d.x - c.x - 12), Math.max(0, d.y - c.y - 12));
+      if (block.paths) {
+        // A sand path crossing the lawn, so a park is not one flat green rectangle.
+        ctx.strokeStyle = 'rgba(206, 188, 150, 0.8)';
+        ctx.lineWidth = Math.max(2, 9 * camera.zoom);
+        ctx.beginPath();
+        ctx.moveTo(c.x, (c.y + d.y) / 2);
+        ctx.lineTo(d.x, (c.y + d.y) / 2);
+        ctx.moveTo((c.x + d.x) / 2, c.y);
+        ctx.lineTo((c.x + d.x) / 2, d.y);
+        ctx.stroke();
+      }
+    }
+    if (block.asphalt) {
+      const c = worldToScreen(camera, block.asphalt.x, block.asphalt.y);
+      const d = worldToScreen(camera, block.asphalt.x + block.asphalt.w, block.asphalt.y + block.asphalt.h);
+      ctx.fillStyle = '#4e4a42';
+      ctx.fillRect(c.x, c.y, d.x - c.x, d.y - c.y);
+      ctx.strokeStyle = 'rgba(232, 226, 206, 0.4)';
+      ctx.lineWidth = Math.max(1, 1.4 * camera.zoom);
+      ctx.beginPath();
+      for (let x = block.asphalt.x + 16; x < block.asphalt.x + block.asphalt.w - 10; x += 34) {
+        for (let row = 0; row * 112 < block.asphalt.h - 40; row += 1) {
+          const p1 = worldToScreen(camera, x, block.y + 28 + row * 112);
+          const p2 = worldToScreen(camera, x, block.y + 72 + row * 112);
+          ctx.moveTo(p1.x, p1.y);
+          ctx.lineTo(p2.x, p2.y);
+        }
+      }
+      ctx.stroke();
     }
   }
+}
 
-  function drawHud(state) {
-    context.textBaseline = 'top';
-    text(scoreLabel(state.score), 24, 20, 28, PALETTE.text, 'left');
-    text(levelLabel(state.level), FIELD.width / 2, 20, 28, PALETTE.text, 'center');
-    const firstLife = FIELD.width - 24 - LIVES * (LIFE_SIZE + LIFE_GAP) + LIFE_GAP;
-    text('Lives', firstLife - 12, 20, 28, PALETTE.text, 'right');
-    for (let life = 0; life < LIVES; life += 1) {
-      context.fillStyle = life < state.lives ? PALETTE.player : PALETTE.ground;
-      context.fillRect(firstLife + life * (LIFE_SIZE + LIFE_GAP), 24, LIFE_SIZE, LIFE_SIZE);
+/** Tyre marks, faded by age. */
+function drawSkids(ctx, game) {
+  const camera = game.camera;
+  ctx.lineCap = 'round';
+  for (const skid of game.effects.skids) {
+    const fade = 1 - skid.age / skid.life;
+    ctx.strokeStyle = `rgba(32, 28, 24, ${0.3 * fade * skid.strength})`;
+    ctx.lineWidth = Math.max(1, 4 * camera.zoom);
+    const a = worldToScreen(camera, skid.x, skid.y);
+    const b = worldToScreen(camera, skid.x2, skid.y2);
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.stroke();
+  }
+}
+
+/** Timber piers over the water, with plank lines. */
+function drawPiers(ctx, game, bounds) {
+  const camera = game.camera;
+  for (const pier of game.city.piers) {
+    if (pier.x > bounds.x + bounds.w || pier.x + pier.w < bounds.x || pier.y > bounds.y + bounds.h) continue;
+    const a = worldToScreen(camera, pier.x, pier.y);
+    const b = worldToScreen(camera, pier.x + pier.w, pier.y + pier.h);
+    ctx.fillStyle = 'rgba(20, 40, 44, 0.35)';
+    ctx.fillRect(a.x + 6, a.y + 8, b.x - a.x, b.y - a.y);
+    ctx.fillStyle = '#9b7b55';
+    ctx.fillRect(a.x, a.y, b.x - a.x, b.y - a.y);
+    ctx.strokeStyle = 'rgba(70, 50, 34, 0.5)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let y = pier.y; y < pier.y + pier.h; y += 16) {
+      const p1 = worldToScreen(camera, pier.x, y);
+      const p2 = worldToScreen(camera, pier.x + pier.w, y);
+      ctx.moveTo(p1.x, p1.y);
+      ctx.lineTo(p2.x, p2.y);
+    }
+    ctx.stroke();
+  }
+}
+
+/** Props that lie flat: benches, bollards, boats, crates on the ground. */
+function drawFlatProps(ctx, game, bounds) {
+  const camera = game.camera;
+  for (const prop of game.city.props) {
+    if (prop.x < bounds.x || prop.x > bounds.x + bounds.w || prop.y < bounds.y || prop.y > bounds.y + bounds.h) continue;
+    const point = worldToScreen(camera, prop.x, prop.y);
+    const zoom = camera.zoom;
+    if (prop.type === 'bench') {
+      ctx.fillStyle = 'rgba(30, 26, 20, 0.28)';
+      ctx.fillRect(point.x - 11 * zoom + 4, point.y - 4 * zoom + 4, 22 * zoom, 9 * zoom);
+      ctx.fillStyle = '#9a7149';
+      ctx.fillRect(point.x - 11 * zoom, point.y - 4 * zoom, 22 * zoom, 9 * zoom);
+    } else if (prop.type === 'bollard') {
+      ctx.fillStyle = '#3c4247';
+      ctx.beginPath();
+      ctx.arc(point.x, point.y, 4 * zoom, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (prop.type === 'boat') {
+      ctx.save();
+      ctx.translate(point.x, point.y);
+      ctx.rotate(prop.angle ?? 0);
+      ctx.fillStyle = 'rgba(10, 40, 46, 0.4)';
+      ctx.beginPath();
+      ctx.ellipse(3, 5, 26 * zoom, 10 * zoom, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#e7e2d4';
+      ctx.beginPath();
+      ctx.ellipse(0, 0, 24 * zoom, 8 * zoom, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#2f6f78';
+      ctx.fillRect(-6 * zoom, -4 * zoom, 14 * zoom, 8 * zoom);
+      ctx.restore();
     }
   }
+}
 
-  function drawPanel(title, lines, prompt) {
-    const height = PANEL.top + lines.length * PANEL.line + PANEL.bottom;
-    const x = (FIELD.width - PANEL.width) / 2;
-    const y = (FIELD.height - height) / 2;
-    context.fillStyle = PALETTE.panel;
-    context.fillRect(x, y, PANEL.width, height);
-    context.textBaseline = 'alphabetic';
-    text(title, FIELD.width / 2, y + 78, 48, PALETTE.text, 'center');
-    for (let index = 0; index < lines.length; index += 1) {
-      text(lines[index], FIELD.width / 2, y + PANEL.top + index * PANEL.line, 22, PALETTE.muted, 'center');
-    }
-    text(prompt, FIELD.width / 2, y + height - 40, 24, PALETTE.coin, 'center');
+/** The long shadow every building throws inland. */
+function drawBuildingShadows(ctx, game, bounds) {
+  const camera = game.camera;
+  ctx.fillStyle = `rgba(42, 30, 26, ${LIGHT.shadowAlpha})`;
+  for (const building of game.city.buildings) {
+    if (building.x + building.w < bounds.x || building.x - building.w > bounds.x + bounds.w) continue;
+    if (building.y + building.h < bounds.y || building.y - building.h > bounds.y + bounds.h) continue;
+    const offsetX = -LIGHT.sun.x * building.height * LIGHT.shadowLength;
+    const offsetY = -LIGHT.sun.y * building.height * LIGHT.shadowLength;
+    const a = worldToScreen(camera, building.x - building.w / 2, building.y - building.h / 2);
+    const b = worldToScreen(camera, building.x + building.w / 2, building.y + building.h / 2);
+    const c = worldToScreen(camera, building.x - building.w / 2 + offsetX, building.y - building.h / 2 + offsetY);
+    const d = worldToScreen(camera, building.x + building.w / 2 + offsetX, building.y + building.h / 2 + offsetY);
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, a.y);
+    ctx.lineTo(d.x, c.y);
+    ctx.lineTo(d.x, d.y);
+    ctx.lineTo(c.x, d.y);
+    ctx.lineTo(a.x, b.y);
+    ctx.closePath();
+    ctx.fill();
   }
+}
 
-  const TITLE_LINES = ['Dodge the red blocks. Catch the gold coins.', 'Move with ← → or A D.  Pause with P.', ''];
-  const PAUSED_LINES = ['The blocks will wait for you.'];
-  const OVER_LINES = ['', ''];
-
-  /** Paint one frame: the field, then the HUD or a panel for the screen the game is on. */
-  function draw(state, screen, best) {
-    context.setTransform(1, 0, 0, 1, 0, 0);
-    context.fillStyle = PALETTE.backdrop;
-    context.fillRect(0, 0, canvas.width, canvas.height);
-    context.setTransform(view.scale, 0, 0, view.scale, view.x, view.y);
-    drawField(state);
-    if (screen === SCREEN_TITLE) {
-      TITLE_LINES[2] = bestLabel(best);
-      drawPanel('Block Dodger', TITLE_LINES, 'Press Space or click to start');
-      return;
+/** The buildings themselves: the two faces turned away from the camera, then the roof. */
+function drawBuildings(ctx, game, bounds) {
+  const camera = game.camera;
+  const centreX = VIEW.width / 2;
+  const centreY = VIEW.height / 2;
+  const list = [];
+  for (const building of game.city.buildings) {
+    if (building.x + building.w < bounds.x || building.x - building.w > bounds.x + bounds.w) continue;
+    if (building.y + building.h < bounds.y || building.y - building.h > bounds.y + bounds.h) continue;
+    list.push(building);
+  }
+  // Nearer the middle of the screen is drawn last, so taller things overlap correctly.
+  list.sort((a, b) => {
+    const pa = worldToScreen(camera, a.x, a.y);
+    const pb = worldToScreen(camera, b.x, b.y);
+    return Math.hypot(pb.x - centreX, pb.y - centreY) - Math.hypot(pa.x - centreX, pa.y - centreY);
+  });
+  for (const building of list) {
+    const halfWidth = building.w / 2;
+    const halfHeight = building.h / 2;
+    const base = [
+      worldToScreen(camera, building.x - halfWidth, building.y - halfHeight),
+      worldToScreen(camera, building.x + halfWidth, building.y - halfHeight),
+      worldToScreen(camera, building.x + halfWidth, building.y + halfHeight),
+      worldToScreen(camera, building.x - halfWidth, building.y + halfHeight),
+    ];
+    const roof = [
+      lift(camera, building.x - halfWidth, building.y - halfHeight, building.height),
+      lift(camera, building.x + halfWidth, building.y - halfHeight, building.height),
+      lift(camera, building.x + halfWidth, building.y + halfHeight, building.height),
+      lift(camera, building.x - halfWidth, building.y + halfHeight, building.height),
+    ];
+    const screenCentre = worldToScreen(camera, building.x, building.y);
+    const awayX = screenCentre.x - centreX;
+    const awayY = screenCentre.y - centreY;
+    // Wall faces (north 0-1, east 1-2, south 2-3, west 3-0). Roofs project away from the middle
+    // of the screen, so the face you can actually see is the one turned back toward it: a building
+    // west of the camera shows its east wall. The sun is in the north-west, so north and west are lit.
+    const faces = [];
+    if (awayY > 0) faces.push({ a: 0, b: 1, lit: true });
+    if (awayX < 0) faces.push({ a: 1, b: 2, lit: false });
+    if (awayY < 0) faces.push({ a: 2, b: 3, lit: false });
+    if (awayX > 0) faces.push({ a: 3, b: 0, lit: true });
+    for (const face of faces) {
+      ctx.beginPath();
+      ctx.moveTo(base[face.a].x, base[face.a].y);
+      ctx.lineTo(base[face.b].x, base[face.b].y);
+      ctx.lineTo(roof[face.b].x, roof[face.b].y);
+      ctx.lineTo(roof[face.a].x, roof[face.a].y);
+      ctx.closePath();
+      ctx.fillStyle = face.lit ? shade(building.wall, 1.04, 0.2) : shade(building.wall, 0.62);
+      ctx.fill();
+      drawWindows(ctx, building, base[face.a], base[face.b], roof[face.a], roof[face.b], face.lit);
     }
-    drawHud(state);
-    if (screen === SCREEN_PAUSED) drawPanel('Paused', PAUSED_LINES, 'Press P to resume');
-    else if (screen === SCREEN_OVER) {
-      OVER_LINES[0] = finalLabel(state.score);
-      OVER_LINES[1] = bestLabel(best);
-      drawPanel('Game over', OVER_LINES, 'Press Space or click to play again');
+    // Roof.
+    ctx.beginPath();
+    ctx.moveTo(roof[0].x, roof[0].y);
+    for (let index = 1; index < 4; index += 1) ctx.lineTo(roof[index].x, roof[index].y);
+    ctx.closePath();
+    ctx.fillStyle = shade(building.roof, 1, 0.08);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(38, 27, 20, 0.55)';
+    ctx.lineWidth = Math.max(1.2, 1.8 * camera.zoom);
+    ctx.stroke();
+    if (building.trim) {
+      // A bright parapet on the sunward edges, so roofs do not read as flat colour.
+      ctx.beginPath();
+      ctx.moveTo(roof[3].x, roof[3].y);
+      ctx.lineTo(roof[0].x, roof[0].y);
+      ctx.lineTo(roof[1].x, roof[1].y);
+      ctx.strokeStyle = shade(building.wall, 1.16, 0.34);
+      ctx.lineWidth = Math.max(1.4, 2.6 * camera.zoom);
+      ctx.stroke();
+    }
+    drawRoofClutter(ctx, camera, building, roof);
+  }
+}
+
+/** Vents, housings and water tanks sitting on a roof, each lifted a little above it. */
+function drawRoofClutter(ctx, camera, building, roof) {
+  if (!building.roofProps || building.roofProps.length === 0) return;
+  const zoom = camera.zoom;
+  // The roof's own screen axes, so clutter lands on the roof rather than on the ground plane.
+  const alongX = { x: (roof[1].x - roof[0].x) / 2, y: (roof[1].y - roof[0].y) / 2 };
+  const alongY = { x: (roof[3].x - roof[0].x) / 2, y: (roof[3].y - roof[0].y) / 2 };
+  const centre = { x: (roof[0].x + roof[2].x) / 2, y: (roof[0].y + roof[2].y) / 2 };
+  for (const item of building.roofProps) {
+    const x = centre.x + alongX.x * item.dx * 2 + alongY.x * item.dy * 2;
+    const y = centre.y + alongX.y * item.dx * 2 + alongY.y * item.dy * 2;
+    const w = item.w * zoom;
+    const h = item.h * zoom;
+    ctx.fillStyle = 'rgba(40, 30, 24, 0.3)';
+    if (item.tank) {
+      ctx.beginPath();
+      ctx.ellipse(x + 3, y + 3, w * 0.5, w * 0.42, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = shade(building.roof, 1.3, 0.2);
+      ctx.beginPath();
+      ctx.ellipse(x, y, w * 0.5, w * 0.42, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(42, 32, 24, 0.5)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    } else {
+      ctx.fillRect(x - w / 2 + 3, y - h / 2 + 3, w, h);
+      ctx.fillStyle = shade(building.roof, 1.26, 0.18);
+      ctx.fillRect(x - w / 2, y - h / 2, w, h);
+      ctx.fillStyle = shade(building.roof, 0.76);
+      ctx.fillRect(x - w / 2, y + h / 2 - h * 0.28, w, h * 0.28);
     }
   }
+}
 
-  resize();
-  window.addEventListener('resize', resize);
-  return { draw };
+/** Floor bands and a few lit windows across one wall face. */
+function drawWindows(ctx, building, baseA, baseB, roofA, roofB, lit) {
+  const floors = Math.max(1, Math.min(14, Math.round(building.height / 15)));
+  if (floors < 2) return;
+  ctx.strokeStyle = lit ? 'rgba(255, 238, 200, 0.26)' : 'rgba(26, 24, 22, 0.3)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let floor = 1; floor < floors; floor += 1) {
+    const t = floor / floors;
+    ctx.moveTo(baseA.x + (roofA.x - baseA.x) * t, baseA.y + (roofA.y - baseA.y) * t);
+    ctx.lineTo(baseB.x + (roofB.x - baseB.x) * t, baseB.y + (roofB.y - baseB.y) * t);
+  }
+  ctx.stroke();
+  const columns = Math.max(2, Math.min(9, building.windowCols));
+  ctx.fillStyle = lit ? 'rgba(255, 226, 164, 0.5)' : 'rgba(118, 142, 150, 0.32)';
+  for (let floor = 0; floor < floors; floor += 1) {
+    for (let column = 0; column < columns; column += 1) {
+      // Deterministic sparkle: the building's own stored value decides which panes catch the sun.
+      const chance = ((floor * 7 + column * 13 + Math.floor(building.lit * 97)) % 11) / 11;
+      if (chance > 0.34) continue;
+      const u = (column + 0.5) / columns;
+      const v = (floor + 0.5) / floors;
+      const bx = baseA.x + (baseB.x - baseA.x) * u;
+      const by = baseA.y + (baseB.y - baseA.y) * u;
+      const rx = roofA.x + (roofB.x - roofA.x) * u;
+      const ry = roofA.y + (roofB.y - roofA.y) * u;
+      const x = bx + (rx - bx) * v;
+      const y = by + (ry - by) * v;
+      ctx.fillRect(x - 1.6, y - 1.6, 3.4, 3.4);
+    }
+  }
+}
+
+/** Palms, lamps, tanks, cranes, containers and billboards, all extruded a little. */
+function drawTallProps(ctx, game, bounds) {
+  const camera = game.camera;
+  const zoom = camera.zoom;
+  for (const prop of game.city.props) {
+    if (prop.x < bounds.x - 60 || prop.x > bounds.x + bounds.w + 60 || prop.y < bounds.y - 60 || prop.y > bounds.y + bounds.h + 60) continue;
+    const base = worldToScreen(camera, prop.x, prop.y);
+    const scale = prop.scale ?? 1;
+    if (prop.type === 'palm') {
+      const shadowX = base.x - LIGHT.sun.x * 46 * scale * zoom;
+      const shadowY = base.y - LIGHT.sun.y * 46 * scale * zoom;
+      ctx.strokeStyle = 'rgba(40, 30, 24, 0.26)';
+      ctx.lineWidth = 5 * zoom * scale;
+      ctx.beginPath();
+      ctx.moveTo(base.x, base.y);
+      ctx.lineTo(shadowX, shadowY);
+      ctx.stroke();
+      const top = lift(camera, prop.x, prop.y, 58 * scale);
+      ctx.strokeStyle = '#7a6244';
+      ctx.lineWidth = Math.max(1.6, 3.4 * zoom * scale);
+      ctx.beginPath();
+      ctx.moveTo(base.x, base.y);
+      ctx.quadraticCurveTo(base.x + (top.x - base.x) * 0.4 + 3, (base.y + top.y) / 2, top.x, top.y);
+      ctx.stroke();
+      for (let frond = 0; frond < 7; frond += 1) {
+        const angle = (frond / 7) * Math.PI * 2 + prop.x * 0.01;
+        const length = 20 * scale * zoom;
+        ctx.strokeStyle = frond % 2 === 0 ? '#4e7a46' : '#3f6a3c';
+        ctx.lineWidth = Math.max(1.4, 3.2 * zoom * scale);
+        ctx.beginPath();
+        ctx.moveTo(top.x, top.y);
+        ctx.quadraticCurveTo(
+          top.x + Math.cos(angle) * length * 0.6,
+          top.y + Math.sin(angle) * length * 0.6 - 5 * zoom,
+          top.x + Math.cos(angle) * length,
+          top.y + Math.sin(angle) * length + 5 * zoom,
+        );
+        ctx.stroke();
+      }
+    } else if (prop.type === 'lamp') {
+      const top = lift(camera, prop.x, prop.y, 44);
+      ctx.strokeStyle = '#555c5e';
+      ctx.lineWidth = Math.max(1.2, 2.4 * zoom);
+      ctx.beginPath();
+      ctx.moveTo(base.x, base.y);
+      ctx.lineTo(top.x, top.y);
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(255, 226, 158, 0.9)';
+      ctx.beginPath();
+      ctx.arc(top.x, top.y, 3.2 * zoom, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (prop.type === 'tank') {
+      const radius = (prop.radius ?? 26) * zoom;
+      ctx.fillStyle = 'rgba(40, 30, 24, 0.3)';
+      ctx.beginPath();
+      ctx.ellipse(base.x - LIGHT.sun.x * 26 * zoom, base.y - LIGHT.sun.y * 26 * zoom, radius, radius * 0.8, 0, 0, Math.PI * 2);
+      ctx.fill();
+      const top = lift(camera, prop.x, prop.y, 48);
+      ctx.fillStyle = '#8d8a80';
+      ctx.beginPath();
+      ctx.moveTo(base.x - radius, base.y);
+      ctx.lineTo(base.x + radius, base.y);
+      ctx.lineTo(top.x + radius, top.y);
+      ctx.lineTo(top.x - radius, top.y);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = '#b4b0a4';
+      ctx.beginPath();
+      ctx.ellipse(top.x, top.y, radius, radius * 0.62, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(60, 58, 52, 0.6)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    } else if (prop.type === 'container') {
+      const top = lift(camera, prop.x, prop.y, 26);
+      const w = prop.w * zoom;
+      const h = prop.h * zoom;
+      ctx.fillStyle = 'rgba(40, 30, 24, 0.3)';
+      ctx.fillRect(base.x - w / 2 + 6, base.y - h / 2 + 7, w, h);
+      ctx.fillStyle = shade(prop.hue ?? '#b2563a', 0.7);
+      ctx.fillRect(base.x - w / 2, base.y - h / 2, w, h);
+      ctx.fillStyle = shade(prop.hue ?? '#b2563a', 1.05, 0.1);
+      ctx.fillRect(top.x - w / 2, top.y - h / 2, w, h);
+      ctx.strokeStyle = 'rgba(30, 24, 20, 0.5)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(top.x - w / 2, top.y - h / 2, w, h);
+    } else if (prop.type === 'crane') {
+      const top = lift(camera, prop.x, prop.y, 120);
+      ctx.strokeStyle = '#b9743a';
+      ctx.lineWidth = Math.max(2, 4 * zoom);
+      ctx.beginPath();
+      ctx.moveTo(base.x, base.y);
+      ctx.lineTo(top.x, top.y);
+      ctx.lineTo(top.x + 52 * zoom, top.y + 10 * zoom);
+      ctx.stroke();
+      ctx.strokeStyle = 'rgba(60, 50, 40, 0.6)';
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.moveTo(top.x + 52 * zoom, top.y + 10 * zoom);
+      ctx.lineTo(top.x + 52 * zoom, top.y + 40 * zoom);
+      ctx.stroke();
+    } else if (prop.type === 'pipe') {
+      const top = lift(camera, prop.x, prop.y, 30);
+      ctx.strokeStyle = '#8a8378';
+      ctx.lineWidth = Math.max(2, 7 * zoom);
+      ctx.beginPath();
+      ctx.moveTo(base.x - 24 * zoom, base.y);
+      ctx.lineTo(top.x + 24 * zoom, top.y);
+      ctx.stroke();
+    } else if (prop.type === 'billboard') {
+      const top = lift(camera, prop.x, prop.y, 74);
+      const w = 92 * zoom;
+      ctx.strokeStyle = '#6a6256';
+      ctx.lineWidth = Math.max(1.4, 3 * zoom);
+      ctx.beginPath();
+      ctx.moveTo(base.x - w * 0.28, base.y);
+      ctx.lineTo(top.x - w * 0.28, top.y);
+      ctx.moveTo(base.x + w * 0.28, base.y);
+      ctx.lineTo(top.x + w * 0.28, top.y);
+      ctx.stroke();
+      ctx.fillStyle = '#efe6d2';
+      ctx.fillRect(top.x - w / 2, top.y - 20 * zoom, w, 28 * zoom);
+      ctx.strokeStyle = '#b9a98c';
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(top.x - w / 2, top.y - 20 * zoom, w, 28 * zoom);
+      if (prop.text && zoom > 0.6) {
+        ctx.fillStyle = '#b3503f';
+        ctx.font = `bold ${Math.max(5, 7 * zoom)}px system-ui, sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        const words = prop.text.split(' ');
+        const half = Math.ceil(words.length / 2);
+        ctx.fillText(words.slice(0, half).join(' '), top.x, top.y - 10 * zoom);
+        ctx.fillText(words.slice(half).join(' '), top.x, top.y - 1 * zoom);
+      }
+    } else if (prop.type === 'crate') {
+      const top = lift(camera, prop.x, prop.y, 18);
+      const w = 22 * zoom;
+      ctx.fillStyle = 'rgba(40, 30, 24, 0.28)';
+      ctx.fillRect(base.x - w / 2 + 4, base.y - w / 2 + 5, w, w);
+      ctx.fillStyle = '#8d6a44';
+      ctx.fillRect(base.x - w / 2, base.y - w / 2, w, w);
+      ctx.fillStyle = '#a98356';
+      ctx.fillRect(top.x - w / 2, top.y - w / 2, w, w);
+      ctx.strokeStyle = 'rgba(60, 44, 30, 0.6)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(top.x - w / 2, top.y - w / 2, w, w);
+    }
+  }
+  // District signage.
+  for (const sign of game.city.signs) {
+    if (sign.x < bounds.x || sign.x > bounds.x + bounds.w || sign.y < bounds.y || sign.y > bounds.y + bounds.h) continue;
+    const base = worldToScreen(camera, sign.x, sign.y);
+    const top = lift(camera, sign.x, sign.y, 40);
+    ctx.strokeStyle = '#59605f';
+    ctx.lineWidth = Math.max(1.2, 2.2 * zoom);
+    ctx.beginPath();
+    ctx.moveTo(base.x, base.y);
+    ctx.lineTo(top.x, top.y);
+    ctx.stroke();
+    const w = Math.max(46, 7.1 * sign.text.length) * zoom;
+    ctx.fillStyle = '#20423c';
+    roundRect(ctx, top.x - w / 2, top.y - 13 * zoom, w, 15 * zoom, 3 * zoom);
+    ctx.fill();
+    ctx.fillStyle = '#e9f2e4';
+    ctx.font = `bold ${Math.max(6, 9 * zoom)}px system-ui, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(sign.text.toUpperCase(), top.x, top.y - 5 * zoom);
+  }
 }

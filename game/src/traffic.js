@@ -1,0 +1,171 @@
+// Traffic: civilian drivers following the city's road graph, one lane to the right of the centre
+// line, braking for whatever is in front of them and panicking when the shooting starts. They use
+// the same driving model as the player, so a traffic car you steal handles exactly as it drove.
+import { TRAFFIC } from './config.js';
+import { driveVehicle, vehicleSpeed, CIVILIAN_KINDS, createVehicle } from './vehicles.js';
+import { chance, pick, range, rangeInt } from './rng.js';
+
+/** The right-hand lane point for a node, given the direction of travel. */
+function lanePoint(city, nodeIndex, fromX, fromY) {
+  const node = city.nodes[nodeIndex];
+  const dx = node.x - fromX;
+  const dy = node.y - fromY;
+  const length = Math.hypot(dx, dy) || 1;
+  const ux = dx / length;
+  const uy = dy / length;
+  const offset = node.arterial ? 22 : 15;
+  return { x: node.x - uy * offset, y: node.y + ux * offset };
+}
+
+/** Choose the next node, preferring to carry straight on and never doubling straight back. */
+function chooseNext(city, vehicle, random) {
+  const node = city.nodes[vehicle.nextNode];
+  const previous = vehicle.node >= 0 ? city.nodes[vehicle.node] : null;
+  const straight = [];
+  const turns = [];
+  for (const link of node.links) {
+    if (previous && link === vehicle.node) continue;
+    const other = city.nodes[link];
+    if (previous && Math.sign(other.i - node.i) === Math.sign(node.i - previous.i) && Math.sign(other.j - node.j) === Math.sign(node.j - previous.j)) straight.push(link);
+    else turns.push(link);
+  }
+  if (straight.length > 0 && (turns.length === 0 || chance(random, 0.62))) return pick(random, straight);
+  if (turns.length > 0) return pick(random, turns);
+  return node.links.length > 0 ? pick(random, node.links) : vehicle.nextNode;
+}
+
+/** Put `count` civilian cars on the graph, each already rolling along its lane. */
+export function spawnTraffic(random, city, count) {
+  return spawnTrafficOn(random, city, count, null);
+}
+
+/**
+ * The same, but only on junctions within `radius` of a point: mission 2 uses it to put real
+ * traffic between Riley and the drop rather than only promising it.
+ */
+export function spawnTrafficNear(random, city, point, radius, count) {
+  const near = [];
+  for (let index = 0; index < city.nodes.length; index += 1) {
+    if (Math.hypot(city.nodes[index].x - point.x, city.nodes[index].y - point.y) < radius) near.push(index);
+  }
+  return spawnTrafficOn(random, city, count, near.length > 0 ? near : null);
+}
+
+/** Shared by both: `allowed` is a list of junction indices, or null for the whole city. */
+function spawnTrafficOn(random, city, count, allowed) {
+  const traffic = [];
+  for (let index = 0; index < count; index += 1) {
+    const nodeIndex = allowed ? pick(random, allowed) : rangeInt(random, 0, city.nodes.length - 1);
+    const node = city.nodes[nodeIndex];
+    if (node.links.length === 0) continue;
+    const nextIndex = pick(random, node.links);
+    const next = city.nodes[nextIndex];
+    const blend = range(random, 0.18, 0.82);
+    const x = node.x + (next.x - node.x) * blend;
+    const y = node.y + (next.y - node.y) * blend;
+    const vehicle = createVehicle(random, pick(random, CIVILIAN_KINDS), x, y, Math.atan2(next.y - node.y, next.x - node.x), 'traffic');
+    vehicle.node = nodeIndex;
+    vehicle.nextNode = nextIndex;
+    const target = lanePoint(city, nextIndex, node.x, node.y);
+    vehicle.x = x + (target.x - next.x);
+    vehicle.y = y + (target.y - next.y);
+    vehicle.cruise = range(random, TRAFFIC.cruise * 0.82, TRAFFIC.cruise * 1.22);
+    vehicle.vx = Math.cos(vehicle.angle) * vehicle.cruise * 0.6;
+    vehicle.vy = Math.sin(vehicle.angle) * vehicle.cruise * 0.6;
+    traffic.push(vehicle);
+  }
+  return traffic;
+}
+
+/** Is anything in the short cone ahead of this car? Returns the gap, or Infinity. */
+function gapAhead(vehicle, others, extra) {
+  const cos = Math.cos(vehicle.angle);
+  const sin = Math.sin(vehicle.angle);
+  let closest = Infinity;
+  for (const other of others) {
+    if (other === vehicle) continue;
+    const dx = other.x - vehicle.x;
+    const dy = other.y - vehicle.y;
+    const along = dx * cos + dy * sin;
+    if (along <= 0 || along > TRAFFIC.gap + extra) continue;
+    const across = Math.abs(-dx * sin + dy * cos);
+    if (across > 24) continue;
+    closest = Math.min(closest, along);
+  }
+  return closest;
+}
+
+/** Drive every civilian car one step. */
+export function updateTraffic(game, dt) {
+  const { city, random } = game;
+  const all = game.vehicles;
+  for (const vehicle of game.vehicles) {
+    if (vehicle.driver !== 'traffic' || vehicle.dead) continue;
+    if (vehicle.nextNode < 0 || vehicle.nextNode >= city.nodes.length) {
+      vehicle.nextNode = rangeInt(random, 0, city.nodes.length - 1);
+    }
+    const from = vehicle.node >= 0 ? city.nodes[vehicle.node] : vehicle;
+    const target = lanePoint(city, vehicle.nextNode, from.x, from.y);
+    const dx = target.x - vehicle.x;
+    const dy = target.y - vehicle.y;
+    const distance = Math.hypot(dx, dy);
+    if (distance < 30) {
+      const next = chooseNext(city, vehicle, random);
+      vehicle.node = vehicle.nextNode;
+      vehicle.nextNode = next;
+    }
+    let want = Math.atan2(dy, dx);
+    let difference = ((want - vehicle.angle + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
+    const steer = Math.max(-1, Math.min(1, difference * 2.3));
+    const gap = gapAhead(vehicle, all, Math.abs(vehicle.forward) * 0.33);
+    let cruise = vehicle.cruise ?? TRAFFIC.cruise;
+    if (Math.abs(difference) > 0.5) cruise *= TRAFFIC.turnSlow;
+    // Panic in a chase: civilians stop dead rather than drive through a gunfight.
+    if (game.wanted.stars >= 3 && Math.hypot(vehicle.x - game.player.x, vehicle.y - game.player.y) < 380) cruise *= 0.2;
+    let throttle = vehicleSpeed(vehicle) < cruise ? 0.86 : -0.1;
+    if (gap < TRAFFIC.brakeGap) throttle = -0.8;
+    else if (gap < TRAFFIC.gap) throttle = -0.2;
+    if (gap < 30) throttle = -1;
+    vehicle.stuck = vehicleSpeed(vehicle) < 10 ? vehicle.stuck + dt : 0;
+    if (vehicle.stuck > 4.5) {
+      // Nudged onto a kerb: aim at the lane again and reverse out.
+      throttle = -0.6;
+      if (vehicle.stuck > 6) {
+        vehicle.stuck = 0;
+        vehicle.angle = want;
+      }
+    }
+    driveVehicle(city, vehicle, dt, { throttle, steer, handbrake: false });
+  }
+}
+
+/** Keep traffic in frame: cars left far behind are moved to a road near the player. */
+export function recycleTraffic(game, focusX, focusY) {
+  const { city, random } = game;
+  for (const vehicle of game.vehicles) {
+    if (vehicle.driver !== 'traffic' || vehicle.dead) continue;
+    if (Math.hypot(vehicle.x - focusX, vehicle.y - focusY) < 1900) continue;
+    const candidates = [];
+    for (let index = 0; index < city.nodes.length; index += 1) {
+      const node = city.nodes[index];
+      const away = Math.hypot(node.x - focusX, node.y - focusY);
+      if (away > 620 && away < 1250 && node.links.length > 0) candidates.push(index);
+    }
+    if (candidates.length === 0) continue;
+    const nodeIndex = pick(random, candidates);
+    const node = city.nodes[nodeIndex];
+    const nextIndex = pick(random, node.links);
+    const next = city.nodes[nextIndex];
+    const target = lanePoint(city, nextIndex, node.x, node.y);
+    vehicle.x = node.x + (target.x - next.x);
+    vehicle.y = node.y + (target.y - next.y);
+    vehicle.angle = Math.atan2(next.y - node.y, next.x - node.x);
+    vehicle.node = nodeIndex;
+    vehicle.nextNode = nextIndex;
+    vehicle.vx = Math.cos(vehicle.angle) * 60;
+    vehicle.vy = Math.sin(vehicle.angle) * 60;
+    vehicle.health = vehicle.kind.health;
+    vehicle.smoke = 0;
+    vehicle.stuck = 0;
+  }
+}
