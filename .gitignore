@@ -9,3 +9,6 @@ node_modules/
 
 # macOS filesystem metadata
 .DS_Store
+
+# Python bytecode from tools/
+__pycache__/

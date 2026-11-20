@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Take the four PORT SABLE screenshots from the real game, then build the entry.
+# Take the four PORT SABLE screenshots (title, street, combat, chase) from the real game, then
+# build the entry.
 #
 #   tools/shoot.sh            take the shots and run the build
 #   tools/shoot.sh --no-build just the shots
@@ -28,8 +29,8 @@ for _ in $(seq 1 40); do
   sleep 0.25
 done
 
-shots=(title street drive wanted)
-names=(1-title 2-street 3-drive 4-wanted)
+shots=(title street combat chase)
+names=(1-title 2-street 3-combat 4-chase)
 raw="$(mktemp -d)"
 mkdir -p screenshots
 

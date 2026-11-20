@@ -4,16 +4,19 @@
 // loads one ES module tree (game/src/*.js) drawn on a 1280x720 Canvas 2D buffer — no library, no
 // build step, no network request, every sound synthesised in WebAudio at run time. It is an
 // original open-world crime game set in Port Sable, a sun-bleached gulf-coast city: five named
-// districts, traffic and a crowd, cars to hotwire and drive, a wanted level with police who chase,
-// block and shoot, four story missions for Riley Voss and Mae Calder, fists and two guns, a HUD
-// with a minimap, a title card, a pause menu and a save in localStorage.
+// districts, traffic and a crowd, cars to hotwire and drive, a wanted level 1-5 with a named
+// dispatch of cruisers that chase, ram and block and an air unit that spotlights you, six story
+// jobs in eighteen stages for Riley Voss and Mae Calder, fists and three guns in four slots,
+// vests and respect, a dense HUD with a minimap, a title card with three save slots and a pause
+// menu that writes them.
 //
 // This program hands that in: it copies game/ and screenshots/ beside it into the output
 // directory and writes dossier.json, the summary the judge reads, with the vendored make.fun
 // library. The caps below are the scorer's own, from reference/gate.json.
 //
 // Play it locally with `node serve.ts`, then open http://localhost:8080.
-// Retake the four screenshots with `tools/shoot.sh` (headless Chrome, deterministic ?shot= scenes).
+// Retake the four screenshots with `tools/shoot.sh` (headless Chrome, deterministic ?shot= scenes:
+// title, street, combat, chase).
 // Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
 
