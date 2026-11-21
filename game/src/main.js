@@ -1,3 +1,4 @@
+// PORT SABLE main entry point
 // Boot and the one loop. Input is read once a frame, the world advances in fixed 1/60 s steps
 // (several in a slow frame, none in a fast one), then the city, the actors and the HUD are painted.
 // The game moves between three screens: the title card, play, and the pause menu.

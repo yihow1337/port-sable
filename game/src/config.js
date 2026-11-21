@@ -173,7 +173,7 @@ export const WEAPONS = {
 export const RANKS = [
   { at: 0, name: 'Nobody' },
   { at: 60, name: 'Wheelman' },
-  { at: 180, name: 'Mae\u2019s Driver' },
+  { at: 180, name: 'Mae's Driver' },
   { at: 420, name: 'Harbour Name' },
   { at: 900, name: 'Port Sable Legend' },
 ];
@@ -190,14 +190,14 @@ export const AIR = {
 
 /** KSBL 92.4 Gulf Gold: the radio line the HUD shows while Riley is driving. All original. */
 export const RADIO = {
-  station: 'KSBL 92.4 \u00b7 GULF GOLD',
+  station: 'KSBL 92.4 · GULF GOLD',
   tracks: [
-    'Marchetti Quartet \u2014 Low Tide Waltz',
-    'The Sable Sisters \u2014 Nothing Opens Till Six',
-    'Vaughn Delacroix \u2014 Pier Two Blues',
-    'Alma Reyes \u2014 Drive It Like It Is Yours',
-    'The Night Refinery \u2014 Sodium Light',
-    'Hollis Vance Trio \u2014 Nobody Calls Twice',
+    'Marchetti Quartet — Low Tide Waltz',
+    'The Sable Sisters — Nothing Opens Till Six',
+    'Vaughn Delacroix — Pier Two Blues',
+    'Alma Reyes — Drive It Like It Is Yours',
+    'The Night Refinery — Sodium Light',
+    'Hollis Vance Trio — Nobody Calls Twice',
   ],
 };
 
